@@ -1,109 +1,85 @@
-# Corpus-Querier-CLARIN
-# 📊 Corpus Querier for CLARIN.si
+# 🧠 Corpus Querier for CLARIN.SI Corpora
 
-This Python script queries the [CLARIN.si](https://www.clarin.si/) corpus infrastructure to retrieve total hit counts for CQL (Corpus Query Language) queries stored in an Excel spreadsheet. The results replace the original queries in the spreadsheet with their corresponding frequency counts and save the output as a new Excel file.
+This Python script automates querying [CLARIN.SI's Sketch Engine](https://www.clarin.si) corpora using **CQL (Corpus Query Language)** expressions from an Excel spreadsheet. It fetches token frequencies for each CQL pattern and writes them back to the spreadsheet.
 
----
 
-## ✅ Features
-
-- 📥 Reads queries from specified columns and row ranges in an Excel file.
-- 🔍 Sends queries to the CLARIN.si `ske/bonito/run.cgi/first` API endpoint.
-- 🧠 Supports complex CQL expressions such as `[lemma="tata"]`, `[word="bio"]`, etc.
-- 🕓 Enforces a delay (default: 5 seconds) between queries to respect server stability.
-- 🧯 Gracefully handles keyboard interruption (`CTRL+C`) and saves progress.
-- 💥 Automatically catches and logs errors and saves partial output if a failure occurs.
-- 🔔 Emits a completion ping when finished (on supported platforms like Windows).
 
 ---
 
-## ⚙️ How It Works
+## ✨ Features
 
-### Constants and Configuration
-
-- **API Endpoint:** `https://www.clarin.si/ske/bonito/run.cgi/first`
-- **Corpus Name:** `srwac` (can be modified in the script).
-- **Excel Input/Output:**
-  - User is prompted to provide file paths for both input and output files.
-- **Query Delay:** 5 seconds between queries by default.
-- **Columns/Rows:** User specifies which columns and rows to scan via prompts.
-
----
-
-### Querying CLARIN.si (`get_hits` function)
-
-- Accepts a single CQL query string.
-- Sends a GET request to the CLARIN.si Bonito API.
-- Retrieves the total hit count from the `fullsize` field in the JSON response.
-- Returns the count or `None` if the request fails or times out.
+- 📥 **Reads CQLs from Excel (.xlsx)**: Choose columns and row ranges interactively.
+- 🔁 **Runs each query twice**: Ensures reliable results by returning the **maximum** count of both attempts.
+- 📚 **Custom corpus support**: Enter any available CLARIN.SI corpus name (e.g., `srwac`, `hrwac22_rft1`).
+- 🕐 **Timeout safety**: Each query attempt has a 5-minute timeout. Unfinished queries return `"ERROR"`.
+- ⏳ **Rate-limited requests**: Adds a 5-second delay between CQLs to avoid server overload.
+- 💾 **Auto-save on Ctrl+C**: Interrupting the script mid-run will save progress and exit cleanly.
+- 📈 **Writes token counts** into the spreadsheet in place of the original CQLs.
 
 ---
 
-### Main Script Logic
+## 🚀 How to Use
 
-1. Loads the input Excel file into a `pandas` DataFrame.
-2. Prompts the user to enter:
-   - Full path to the input file
-   - Full path for saving the output
-   - Start and end row numbers (1-based)
-   - Columns to scan (e.g., `B,C,D`)
-3. Iterates over each specified cell:
-   - Skips empty or invalid CQL expressions
-   - Calls `get_hits` to retrieve hit count
-   - Replaces the query string in the DataFrame with the numeric result
-   - Waits 5 seconds between requests
-4. Displays progress in the terminal.
-5. On completion or interruption, writes the collected data to the output file.
-6. Emits a system beep if supported by the OS.
+### 1. 🔧 Requirements
 
----
-
-## 🧪 Usage
-
-Run the script from terminal:
+Install required packages:
 
 ```bash
-python clarin_query.py
+pip install requests pandas openpyxl
 
-Follow the prompts:
+2. 🗂 Prepare Your Excel File
+Save your .xlsx file with one CQL query per cell.
 
-📥 Spreadsheet Query Processor for CLARIN.si
-📝 Enter full path to input Excel file: C:\path\to\queries.xlsx
-💾 Enter full path to save output Excel file: C:\path\to\output.xlsx
-🔢 Start from row (1-based): 1
-🔢 End at row (1-based): 100
-🔠 Enter comma-separated column names to scan (e.g., B,C,D): B,C
+Empty or irrelevant cells will be ignored.
 
- Output
-The resulting Excel file mirrors the original structure.
+3. ▶️ Run the Script
+Launch the script in your terminal:
 
-All queried cells are overwritten with their frequency counts (integers).
+python your_script_name.py
 
-🛡️ Error Handling and Safety
-Saves output immediately on error or CTRL+C.
+You will be prompted for:
 
-If a request fails or hangs, the script will timeout after a defined wait period and write all progress so far.
+📂 Input Excel file path
 
-You can re-run the script on skipped/failed parts.
+💾 Output file path for the results
 
-📝 Notes
-This script uses the CLARIN.si Bonito API (ske/bonito/run.cgi/first), not the deprecated noske interface.
+📚 Corpus name (e.g., srwac)
 
-CQL syntax must be valid — malformed queries may return 0 or error.
+🔤 Columns to process (e.g., A,C,E)
 
-Keep a backup of your original Excel file, as queries are overwritten in-place.
+🔢 Row range (e.g., from row 2 to 100)
 
-The script uses a conservative delay to avoid overloading the public infrastructure.
+The script will then:
 
-Designed and tested on the srWaC corpus.
+Query each CQL string twice
 
-🧰 Requirements
-Python 3.8+
+Wait 5 seconds between queries
 
-Dependencies:
+Replace the CQL in the Excel file with the resulting frequency
 
-pandas
+📌 Example
+Input Excel Cell:
 
-requests
+[lemma="udruženje" & !tag="N.*s.*"] [tag=".*g" & !tag="S.*"]
 
-openpyxl
+Resulting Query:
+https://www.clarin.si/ske/bonito/run.cgi/view?corpname=srwac&q=q[lemma="udruženje" & !tag="N.*s.*"] [tag=".*g" & !tag="S.*"]
+
+Output Cell Value:
+6
+
+💡 Notes
+If a query fails or times out, it will be replaced with "ERROR".
+
+Output is saved as an Excel file with CQLs replaced by token counts.
+
+You can safely abort the script mid-run using Ctrl+C.
+
+📜 License
+This project is open-source and released under the MIT License.
+
+🤝 Acknowledgments
+Special thanks to CLARIN.SI for providing open access to powerful corpus querying tools.
+
+
+
