@@ -1,101 +1,92 @@
 import requests
 import urllib.parse
-import pandas as pd
 import time
-import os
-import sys
+import pandas as pd
 import threading
-from datetime import datetime
-import winsound  # Windows-specific; for sound ping
+import signal
+import sys
 
-# === SETTINGS ===
-QUERY_DELAY_SECONDS = 5
-TIMEOUT_SECONDS = 300  # 5 minutes
+# Timeout limit (in seconds) per request
+TIMEOUT_LIMIT = 300
 
-# === Query Function ===
-def get_hits(cql_query, corpus="ENTER CORPUS NAME"):
-    base_url = "https://www.clarin.si/ske/bonito/run.cgi/first"
-    params = {
-        "corpname": corpus,
-        "queryselector": "cqlrow",
-        "default_attr": "word",
-        "cql": cql_query,
-        "pagesize": 1,
-        "format": "json"
-    }
+def get_hits(cql, corpus="srwac"):
+    base_url = "https://www.clarin.si/ske/bonito/run.cgi/view"
+    results = []
 
-    full_url = base_url + "?" + urllib.parse.urlencode(params)
-    print(f"\n🔗 Querying:\n{full_url}")
+    def fetch_in_thread(attempt_num, result_container):
+        try:
+            params = {
+                "corpname": corpus,
+                "q": f"q{cql}",
+                "pagesize": 1,
+                "ctxattrs": "word,tag",
+                "format": "json"
+            }
+            full_url = f"{base_url}?{urllib.parse.urlencode(params)}"
+            print(f"\n🔁 Attempt {attempt_num}")
+            print(f"🔗 URL: {full_url}")
+            response = requests.get(full_url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            result_container.append(data.get("fullsize", 0))
+            print(f"📈 Hits on attempt {attempt_num}: {result_container[-1]}")
+        except Exception as e:
+            print(f"❌ Error on attempt {attempt_num} for CQL={cql}: {e}")
+            result_container.append(None)
 
+    print(f"\n📊 Running query: {cql}")
+
+    for attempt in [1, 2]:
+        result_holder = []
+        thread = threading.Thread(target=fetch_in_thread, args=(attempt, result_holder))
+        thread.start()
+        thread.join(timeout=TIMEOUT_LIMIT)
+
+        if thread.is_alive():
+            print(f"⏰ Timeout on attempt {attempt} for CQL={cql}")
+            results.append(None)
+        else:
+            results.append(result_holder[0] if result_holder else None)
+
+        time.sleep(1)
+
+    time.sleep(5)  # Cooldown after both attempts
+
+    valid_results = [r for r in results if r is not None]
+    return max(valid_results) if valid_results else None
+
+# === Main Execution ===
+if __name__ == "__main__":
     try:
-        response = requests.get(full_url, timeout=TIMEOUT_SECONDS)
-        response.raise_for_status()
-        data = response.json()
-        hits = data.get("fullsize", 0)
-        print(f"✅ Total hits for {cql_query}: {hits}")
-        return hits
-    except Exception as e:
-        print(f"❌ Error while querying '{cql_query}': {e}")
-        raise  # re-raise the error so it can be caught outside
+        input_file = input("📂 Enter full path to Excel file with CQLs: ").strip()
+        output_file = input("💾 Enter full path to save output Excel file: ").strip()
+        corpus_name = input("📚 Enter the corpus name (e.g., srwac): ").strip()
 
-# === Save Function ===
-def save_output(df, output_file):
-    df.to_excel(output_file, index=False)
-    print(f"💾 Saved output to {output_file}")
+        df = pd.read_excel(input_file, header=None)
+        print(f"📥 Loaded spreadsheet with {df.shape[0]} rows and {df.shape[1]} columns.")
 
-# === Main Loop ===
-def process_file(input_path, output_path, start_row, end_row, columns):
-    try:
-        df = pd.read_excel(input_path)
-    except Exception as e:
-        print(f"❌ Could not load input file: {e}")
-        return
+        col_input = input("🔤 Enter one or more column letters to scan (e.g., A,C,E): ").strip().upper()
+        col_indices = [ord(col.strip()) - ord('A') for col in col_input.split(",")]
 
-    try:
-        for row in range(start_row - 1, end_row):
-            print(f"\n➡️ Processing row {row + 1}")
-            for col in columns:
-                try:
-                    cql = str(df.at[row, col])
-                    if not cql or not cql.startswith("["):
-                        print(f"⏭️ Skipping invalid or empty CQL in row {row+1}, column {col}")
-                        continue
-                    hits = get_hits(cql)
-                    df.at[row, col] = hits
-                    time.sleep(QUERY_DELAY_SECONDS)
-                except Exception as e:
-                    print(f"⚠️ Error in row {row+1}, column {col}: {e}")
-                    save_output(df, output_path)
-                    print("⏸️ Pausing due to error. Exiting.")
-                    return
+        row_start = int(input("🔢 Enter starting row number (e.g., 2): ")) - 1
+        row_end = int(input("🔢 Enter ending row number (inclusive): "))
+
+        print(f"\n⏳ Press Ctrl+C to stop at any time — progress will be saved.")
+        print(f"▶️ Scanning columns {col_input} and rows {row_start + 1}–{row_end}")
+
+        for row in range(row_start, row_end):
+            for col in col_indices:
+                original_value = str(df.iat[row, col]).strip()
+                if original_value:
+                    print(f"\n📍 Cell R{row + 1}C{col + 1} → CQL: {original_value}")
+                    token_count = get_hits(original_value, corpus=corpus_name)
+                    df.iat[row, col] = token_count if token_count is not None else "ERROR"
+
+        df.to_excel(output_file, index=False, header=False)
+        print(f"\n✅ Final output saved to: {output_file}")
 
     except KeyboardInterrupt:
-        print("\n🛑 Interrupted by user (CTRL+C). Saving progress...")
-        save_output(df, output_path)
-        return
-    except Exception as e:
-        print(f"❌ Unexpected failure: {e}")
-        save_output(df, output_path)
-        return
-
-    # ✅ If everything completes
-    save_output(df, output_path)
-    winsound.Beep(1000, 1000)  # beep: frequency=1000Hz, duration=1000ms
-    print("✅ All done! ✨")
-
-# === Entry Point ===
-if __name__ == "__main__":
-    print("📥 Spreadsheet Query Processor for CLARIN.si")
-
-    try:
-        input_file = input("📝 Enter full path to input Excel file: ").strip().strip('"')
-        output_file = input("💾 Enter full path to save output Excel file: ").strip().strip('"')
-        start_row = int(input("🔢 Start from row (1-based): ").strip())
-        end_row = int(input("🔢 End at row (1-based): ").strip())
-        columns_input = input("🔠 Enter comma-separated column names to scan (e.g., B,C,D): ").strip()
-        columns = [col.strip().upper() for col in columns_input.split(",")]
-    except Exception as e:
-        print(f"❌ Invalid input: {e}")
-        sys.exit(1)
-
-    process_file(input_file, output_file, start_row, end_row, columns)
+        print("\n🛑 Interrupted by user. Saving current progress...")
+        df.to_excel(output_file, index=False, header=False)
+        print(f"💾 Progress saved to: {output_file}")
+        sys.exit(0)
