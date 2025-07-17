@@ -13,7 +13,7 @@ QUERY_DELAY_SECONDS = 5
 TIMEOUT_SECONDS = 300  # 5 minutes
 
 # === Query Function ===
-def get_hits(cql_query, corpus="srwac"):
+def get_hits(cql_query, corpus="ENTER CORPUS NAME"):
     base_url = "https://www.clarin.si/ske/bonito/run.cgi/first"
     params = {
         "corpname": corpus,
