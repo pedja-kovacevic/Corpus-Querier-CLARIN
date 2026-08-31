@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Corpus Querier
+GenericName=Corpus Query Tool
+Comment=Run CQL frequency queries against CLARIN.SI corpora
+Exec=corpus-querier
+Icon=corpus-querier
+Terminal=false
+Categories=Education;Science;DataVisualization;
+Keywords=corpus;linguistics;CQL;CLARIN;research;
+StartupNotify=true
+

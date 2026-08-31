@@ -1,0 +1,12 @@
+Package: corpus-querier
+Version: @VERSION@
+Section: science
+Priority: optional
+Architecture: amd64
+Maintainer: Predrag Kovačević
+Depends: libc6 (>= 2.35), libx11-6, libxext6, libxrender1, libxft2, libfontconfig1, libfreetype6, libxcb1, zlib1g
+Description: Desktop CQL frequency-query tool for CLARIN.SI
+ Corpus Querier processes existing CQL spreadsheets or generates CQL queries
+ from words and reusable WORD or LEMMA templates. It displays live progress and
+ saves query frequencies to Excel workbooks.
+
