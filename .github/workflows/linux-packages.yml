@@ -1,0 +1,62 @@
+name: Build Linux packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfuse2
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build standalone Linux application
+        run: python -m PyInstaller --noconfirm --clean CorpusQuerier.spec
+
+      - name: Download AppImage packaging tool
+        run: |
+          curl --fail --location --output appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+      - name: Build AppImage and Debian package
+        run: bash linux/build_linux_packages.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Upload Linux package artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: Corpus-Querier-Linux-Packages
+          path: |
+            linux-output/Corpus-Querier-x86_64.AppImage
+            linux-output/corpus-querier_*_amd64.deb
+          if-no-files-found: error
+
+      - name: Attach packages to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            linux-output/Corpus-Querier-x86_64.AppImage
+            linux-output/corpus-querier_*_amd64.deb
+          generate_release_notes: true
+
