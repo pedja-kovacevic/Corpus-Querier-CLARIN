@@ -15,7 +15,7 @@ import requests
 
 
 APP_NAME = "Corpus Querier"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 BASE_URL = "https://www.clarin.si/ske/bonito/run.cgi/view"
 COMMON_CORPORA = ["srwac", "hrwac22_rft1", "bswac", "slwac", "mk_wac"]
 PLACEHOLDER_RE = re.compile(r"\{(?:WORD|LEMMA)\}|\b(?:WORD|LEMMA)\b")
@@ -120,6 +120,7 @@ class QueryWorker(threading.Thread):
         }
         full_url = f"{BASE_URL}?{urllib.parse.urlencode(params)}"
         last_error: Exception | None = None
+        valid_results: list[int] = []
         started = time.monotonic()
 
         for attempt in range(1, self.config.attempts + 1):
@@ -134,17 +135,26 @@ class QueryWorker(threading.Thread):
                 if "fullsize" not in data:
                     raise QueryError("Response does not contain 'fullsize'.")
                 hits = int(data["fullsize"])
-                duration = time.monotonic() - started
-                self.log(f"Hits: {hits:,} ({duration:.1f} s)")
-                return hits, attempt, duration
+                valid_results.append(hits)
+                self.log(f"Hits on attempt {attempt}: {hits:,}")
             except Exception as error:
                 last_error = error
                 self.log(f"Error: {error}")
-                if attempt < self.config.attempts:
-                    if self.stop_event.wait(min(2 ** attempt, 10)):
-                        raise InterruptedError
+            if attempt < self.config.attempts:
+                if self.stop_event.wait(1):
+                    raise InterruptedError
 
-        raise QueryError(str(last_error or "Query failed."))
+        if valid_results:
+            highest = max(valid_results)
+            duration = time.monotonic() - started
+            self.log(
+                f"Highest valid result: {highest:,} "
+                f"({len(valid_results)}/{self.config.attempts} successful attempts; "
+                f"{duration:.1f} s)"
+            )
+            return highest, self.config.attempts, duration
+
+        raise QueryError(str(last_error or "All query attempts failed."))
 
     def load_job(self) -> tuple[pd.DataFrame, list[tuple[int, int, str]]]:
         cfg = self.config

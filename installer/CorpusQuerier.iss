@@ -1,5 +1,5 @@
 #define MyAppName "Corpus Querier"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Predrag Kovačević"
 #define MyAppExeName "Corpus Querier.exe"
 
@@ -43,4 +43,3 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
-

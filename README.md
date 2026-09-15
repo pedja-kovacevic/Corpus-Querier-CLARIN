@@ -7,10 +7,14 @@ Corpus Querier is a Windows desktop application for running CQL frequency querie
 Download the appropriate package from the latest GitHub release:
 
 - **Windows:** `Corpus-Querier-Setup.exe`
-- **Ubuntu, Debian or Linux Mint:** `corpus-querier_1.0.0_amd64.deb`
+- **Ubuntu, Debian or Linux Mint:** `corpus-querier_1.0.1_amd64.deb`
 - **Other x86-64 Linux distributions:** `Corpus-Querier-x86_64.AppImage`
 
 The Windows installer creates Start Menu and optional Desktop shortcuts and adds Corpus Querier to Windows **Installed apps**, from which it can be uninstalled normally.
+
+For every CQL, the app performs the configured number of attempts (two by
+default) and saves the highest valid hit count. This is intentional: some
+corpora may return an incomplete count on the first request.
 
 Python, PowerShell, VS Code, and manual dependency installation are not required.
 
@@ -19,7 +23,7 @@ Python, PowerShell, VS Code, and manual dependency installation are not required
 On Ubuntu, Debian or Linux Mint, double-click the `.deb` file and open it with the system Software Installer. It can also be installed from a terminal with:
 
 ```bash
-sudo apt install ./corpus-querier_1.0.0_amd64.deb
+sudo apt install ./corpus-querier_1.0.1_amd64.deb
 ```
 
 The AppImage does not install anything. Mark it executable and open it:
@@ -44,8 +48,8 @@ The included GitHub Actions workflow can build the Windows installer without req
 To publish a release automatically, create and push a version tag:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 GitHub will build the Windows installer, Linux AppImage and Debian package, create the release, and attach all three downloads.
