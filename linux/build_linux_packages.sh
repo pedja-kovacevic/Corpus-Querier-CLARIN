@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-1.0.0}"
+VERSION="${1:-2.0.0}"
 if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+)*([+-][A-Za-z0-9.]+)?$ ]]; then
-  VERSION="1.0.0"
+  VERSION="2.0.0"
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -65,4 +65,3 @@ dpkg-deb --build --root-owner-group "$DEB_ROOT" \
   "$OUTPUT_DIR/corpus-querier_${VERSION}_amd64.deb"
 
 echo "Linux packages created in $OUTPUT_DIR"
-

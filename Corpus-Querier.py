@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -15,10 +16,18 @@ import requests
 
 
 APP_NAME = "Corpus Querier"
-APP_VERSION = "1.0.1"
-BASE_URL = "https://www.clarin.si/ske/bonito/run.cgi/view"
+APP_VERSION = "2.0.0"  # Public release version
+VIEW_URL = "https://www.clarin.si/ske/bonito/run.cgi/view"
+FREQS_URL = "https://www.clarin.si/ske/bonito/run.cgi/freqs"
+DEFAULT_MIN_FORM_FREQUENCY = 1
 COMMON_CORPORA = ["srwac", "hrwac22_rft1", "bswac", "slwac", "mk_wac"]
 PLACEHOLDER_RE = re.compile(r"\{(?:WORD|LEMMA)\}|\b(?:WORD|LEMMA)\b")
+OUTPUT_MODES = {
+    "Total frequency": "total",
+    "Forms only": "forms",
+    "Forms with frequencies": "forms_frequencies",
+    "Total + forms with frequencies": "total_forms_frequencies",
+}
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -87,6 +96,26 @@ class JobConfig:
     timeout: float
     attempts: int
     save_every: int
+    min_form_frequency: int
+    case_sensitive: bool
+    output_mode: str
+
+
+@dataclass
+class QueryResult:
+    total_hits: int | None
+    forms: list[tuple[str, int]]
+    successful_attempts: int
+    duration: float
+
+
+@dataclass
+class QueryTask:
+    row: int
+    column: int
+    cql: str
+    input_value: str = ""
+    template: str = ""
 
 
 class QueryError(RuntimeError):
@@ -103,6 +132,9 @@ class QueryWorker(threading.Thread):
         self.session.headers.update(
             {"User-Agent": f"Corpus-Querier/{APP_VERSION} (CLARIN.SI research client)"}
         )
+        self.query_records: list[dict] = []
+        self.form_records: list[dict] = []
+        self.run_started_at = datetime.now().astimezone()
 
     def emit(self, kind: str, **payload) -> None:
         self.events.put((kind, payload))
@@ -110,17 +142,100 @@ class QueryWorker(threading.Thread):
     def log(self, text: str) -> None:
         self.emit("log", text=text)
 
-    def fetch_hits(self, cql: str) -> tuple[int, int, float]:
+    @staticmethod
+    def parse_forms_response(data: dict) -> dict[str, int]:
+        """Return {word form: frequency} from a Sketch Engine freqs response."""
+
+        if "Blocks" not in data:
+            raise QueryError("Response does not contain 'Blocks'.")
+
+        forms: dict[str, int] = {}
+
+        for block in data.get("Blocks", []):
+            for item in block.get("Items", []):
+                word_values = item.get("Word", [])
+
+                if not word_values:
+                    continue
+
+                form = str(word_values[0].get("n", "")).strip()
+
+                if not form:
+                    continue
+
+                # CLARIN.SI Bonito uses "frq"; newer Sketch Engine
+                # documentation uses "freq". Support both variants.
+                frequency = int(item.get("frq", item.get("freq", 0)))
+                forms[form] = max(forms.get(form, 0), frequency)
+
+        return forms
+
+    def _prepare_forms(self, forms: dict[str, int]) -> list[tuple[str, int]]:
+        """Apply capitalization grouping and the user's frequency threshold."""
+
+        if self.config.case_sensitive:
+            filtered = {
+                form: frequency
+                for form, frequency in forms.items()
+                if frequency >= self.config.min_form_frequency
+            }
+        else:
+            grouped: dict[str, tuple[str, int, int]] = {}
+            for form, frequency in forms.items():
+                key = form.casefold()
+                if key not in grouped:
+                    grouped[key] = (form, frequency, frequency)
+                    continue
+                representative, representative_frequency, total = grouped[key]
+                if frequency > representative_frequency:
+                    representative = form
+                    representative_frequency = frequency
+                grouped[key] = (
+                    representative,
+                    representative_frequency,
+                    total + frequency,
+                )
+            filtered = {
+                representative: total
+                for representative, _, total in grouped.values()
+                if total >= self.config.min_form_frequency
+            }
+
+        return sorted(
+            filtered.items(),
+            key=lambda pair: (-pair[1], pair[0].casefold(), pair[0]),
+        )
+
+    def fetch_result(self, cql: str) -> QueryResult:
+        """Run all attempts and return the requested total and/or word forms."""
+
+        needs_forms = self.config.output_mode != "total"
         params = {
             "corpname": self.config.corpus,
             "q": f"q{cql}",
-            "pagesize": 1,
-            "ctxattrs": "word,tag",
             "format": "json",
         }
-        full_url = f"{BASE_URL}?{urllib.parse.urlencode(params)}"
+        endpoint = VIEW_URL
+        if needs_forms:
+            endpoint = FREQS_URL
+            params.update(
+                {
+                    # The first token matched by the CQL expression.
+                    "fcrit": "word/ 0",
+                    # Always retrieve all forms. Filtering happens locally so
+                    # case variants can be combined before applying a threshold.
+                    "flimit": 1,
+                    "ml": 1,
+                }
+            )
+        else:
+            params.update({"pagesize": 1, "ctxattrs": "word,tag"})
+
+        full_url = f"{endpoint}?{urllib.parse.urlencode(params)}"
         last_error: Exception | None = None
-        valid_results: list[int] = []
+        totals: list[int] = []
+        combined_forms: dict[str, int] = {}
+        successful_attempts = 0
         started = time.monotonic()
 
         for attempt in range(1, self.config.attempts + 1):
@@ -134,29 +249,53 @@ class QueryWorker(threading.Thread):
                 data = response.json()
                 if "fullsize" not in data:
                     raise QueryError("Response does not contain 'fullsize'.")
-                hits = int(data["fullsize"])
-                valid_results.append(hits)
-                self.log(f"Hits on attempt {attempt}: {hits:,}")
+
+                total = int(data["fullsize"])
+                totals.append(total)
+                successful_attempts += 1
+
+                if needs_forms:
+                    attempt_forms = self.parse_forms_response(data)
+                    for form, frequency in attempt_forms.items():
+                        combined_forms[form] = max(
+                            combined_forms.get(form, 0), frequency
+                        )
+                    preview = "; ".join(
+                        form
+                        for form, _ in sorted(
+                            attempt_forms.items(),
+                            key=lambda pair: (-pair[1], pair[0].casefold()),
+                        )[:10]
+                    )
+                    self.log(
+                        f"Attempt {attempt}: {total:,} total hits; "
+                        f"{len(attempt_forms):,} distinct forms"
+                        + (f" — {preview}" if preview else "")
+                    )
+                else:
+                    self.log(f"Hits on attempt {attempt}: {total:,}")
             except Exception as error:
                 last_error = error
                 self.log(f"Error: {error}")
-            if attempt < self.config.attempts:
-                if self.stop_event.wait(1):
-                    raise InterruptedError
 
-        if valid_results:
-            highest = max(valid_results)
-            duration = time.monotonic() - started
-            self.log(
-                f"Highest valid result: {highest:,} "
-                f"({len(valid_results)}/{self.config.attempts} successful attempts; "
-                f"{duration:.1f} s)"
-            )
-            return highest, self.config.attempts, duration
+            if attempt < self.config.attempts and self.stop_event.wait(1):
+                raise InterruptedError
 
-        raise QueryError(str(last_error or "All query attempts failed."))
+        if not successful_attempts:
+            raise QueryError(str(last_error or "All query attempts failed."))
 
-    def load_job(self) -> tuple[pd.DataFrame, list[tuple[int, int, str]]]:
+        duration = time.monotonic() - started
+        total_hits = max(totals)
+        forms = self._prepare_forms(combined_forms) if needs_forms else []
+        self.log(
+            f"Combined result: {total_hits:,} total hits; "
+            f"{len(forms):,} forms above threshold "
+            f"({successful_attempts}/{self.config.attempts} successful attempts; "
+            f"{duration:.1f} s)"
+        )
+        return QueryResult(total_hits, forms, successful_attempts, duration)
+
+    def load_job(self) -> tuple[pd.DataFrame, list[QueryTask]]:
         cfg = self.config
         if cfg.mode == "existing":
             dataframe = pd.read_excel(cfg.input_file, header=None)
@@ -175,7 +314,7 @@ class QueryWorker(threading.Thread):
                     if not cql.startswith("["):
                         self.log(f"Skipped invalid CQL at {index_to_column_letter(column)}{row + 1}: {cql}")
                         continue
-                    tasks.append((row, column, cql))
+                    tasks.append(QueryTask(row, column, cql))
             return dataframe, tasks
 
         if cfg.word_source == "spreadsheet":
@@ -199,14 +338,86 @@ class QueryWorker(threading.Thread):
             row = len(dataframe)
             queries = [generate_cql(template, word) for template in cfg.templates]
             dataframe.loc[row] = [word, *queries]
-            for offset, cql in enumerate(queries, start=1):
-                tasks.append((row, offset, cql))
+            for offset, (template, cql) in enumerate(
+                zip(cfg.templates, queries), start=1
+            ):
+                tasks.append(
+                    QueryTask(row, offset, cql, input_value=word, template=template)
+                )
         return dataframe, tasks
+
+    @staticmethod
+    def _style_worksheet(worksheet) -> None:
+        """Apply lightweight formatting to a structured result sheet."""
+
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for cell in worksheet[1]:
+            cell.font = cell.font.copy(bold=True, color="FFFFFF")
+            cell.fill = cell.fill.copy(fill_type="solid", fgColor="2563EB")
+        for column_cells in worksheet.columns:
+            values = [str(cell.value or "") for cell in column_cells]
+            width = min(max((len(value) for value in values), default=8) + 2, 60)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = width
 
     def save(self, dataframe: pd.DataFrame) -> None:
         self.config.output_file.parent.mkdir(parents=True, exist_ok=True)
-        dataframe.to_excel(self.config.output_file, index=False, header=False)
-        self.log(f"Saved: {self.config.output_file}")
+
+        # Total-frequency mode intentionally preserves the original workbook
+        # layout and replaces each processed CQL cell with its hit count.
+        if self.config.output_mode == "total":
+            dataframe.to_excel(self.config.output_file, index=False, header=False)
+            self.log(f"Saved: {self.config.output_file}")
+            return
+
+        query_columns = [
+            "QUERY ID", "SOURCE CELL", "INPUT", "TEMPLATE", "CQL",
+        ]
+        if self.config.output_mode == "total_forms_frequencies":
+            query_columns.append("TOTAL HITS")
+        query_columns.extend(
+            ["DISTINCT FORMS", "STATUS", "ATTEMPTS", "DURATION (S)", "ERROR"]
+        )
+
+        form_columns = ["QUERY ID", "INPUT", "FORM"]
+        if self.config.output_mode in {
+            "forms_frequencies", "total_forms_frequencies"
+        }:
+            form_columns.append("FREQUENCY")
+        if self.config.output_mode == "total_forms_frequencies":
+            form_columns.append("% OF TOTAL")
+        form_columns.append("RANK")
+
+        output_label = next(
+            label for label, value in OUTPUT_MODES.items()
+            if value == self.config.output_mode
+        )
+        run_information = [
+            ("Application", f"{APP_NAME} {APP_VERSION}"),
+            ("Corpus", self.config.corpus),
+            ("Output type", output_label),
+            ("Capitalization", "Sensitive" if self.config.case_sensitive else "Ignored and combined"),
+            ("Minimum attestations", self.config.min_form_frequency),
+            ("Attempts per query", self.config.attempts),
+            ("Delay between queries (s)", self.config.delay),
+            ("Request timeout (s)", self.config.timeout),
+            ("Started", self.run_started_at.isoformat(timespec="seconds")),
+            ("Last saved", datetime.now().astimezone().isoformat(timespec="seconds")),
+        ]
+
+        queries_frame = pd.DataFrame(self.query_records, columns=query_columns)
+        forms_frame = pd.DataFrame(self.form_records, columns=form_columns)
+        information_frame = pd.DataFrame(run_information, columns=["SETTING", "VALUE"])
+
+        with pd.ExcelWriter(self.config.output_file, engine="openpyxl") as writer:
+            queries_frame.to_excel(writer, sheet_name="Queries", index=False)
+            forms_frame.to_excel(writer, sheet_name="Forms", index=False)
+            information_frame.to_excel(writer, sheet_name="Run Information", index=False)
+            self._style_worksheet(writer.sheets["Queries"])
+            self._style_worksheet(writer.sheets["Forms"])
+            self._style_worksheet(writer.sheets["Run Information"])
+
+        self.log(f"Saved structured workbook: {self.config.output_file}")
 
     def run(self) -> None:
         started = time.monotonic()
@@ -220,19 +431,79 @@ class QueryWorker(threading.Thread):
             self.emit("started", total=total)
             self.log(f"Prepared {total:,} queries for corpus '{self.config.corpus}'.")
 
-            for position, (row, column, cql) in enumerate(tasks, start=1):
+            for position, task in enumerate(tasks, start=1):
                 if self.stop_event.is_set():
                     break
+                row, column, cql = task.row, task.column, task.cql
                 cell = f"{index_to_column_letter(column)}{row + 1}"
+                query_id = f"Q{position:06d}"
                 self.emit("current", position=position, cell=cell, cql=cql)
                 self.log(f"\n[{position:,}/{total:,}] Cell {cell}\nRunning query: {cql}")
                 try:
-                    hits, attempts, duration = self.fetch_hits(cql)
-                    dataframe.iat[row, column] = hits
+                    result = self.fetch_result(cql)
+                    if self.config.output_mode == "total":
+                        dataframe.iat[row, column] = int(result.total_hits or 0)
+                    else:
+                        self.query_records.append(
+                            {
+                                "QUERY ID": query_id,
+                                "SOURCE CELL": cell,
+                                "INPUT": task.input_value,
+                                "TEMPLATE": task.template,
+                                "CQL": cql,
+                                "TOTAL HITS": int(result.total_hits or 0),
+                                "DISTINCT FORMS": len(result.forms),
+                                "STATUS": "SUCCESS",
+                                "ATTEMPTS": result.successful_attempts,
+                                "DURATION (S)": round(result.duration, 3),
+                                "ERROR": "",
+                            }
+                        )
+                        for rank, (form, frequency) in enumerate(
+                            result.forms, start=1
+                        ):
+                            percentage = (
+                                frequency / result.total_hits * 100
+                                if result.total_hits else 0
+                            )
+                            self.form_records.append(
+                                {
+                                    "QUERY ID": query_id,
+                                    "INPUT": task.input_value,
+                                    "FORM": form,
+                                    "FREQUENCY": frequency,
+                                    "% OF TOTAL": round(percentage, 6),
+                                    "RANK": rank,
+                                }
+                            )
                     completed += 1
-                    self.emit("result", success=True, hits=hits, attempts=attempts, duration=duration)
+                    self.emit(
+                        "result",
+                        success=True,
+                        hits=result.total_hits,
+                        forms=result.forms,
+                        attempts=result.successful_attempts,
+                        duration=result.duration,
+                    )
                 except QueryError as error:
-                    dataframe.iat[row, column] = "ERROR"
+                    if self.config.output_mode == "total":
+                        dataframe.iat[row, column] = "ERROR"
+                    else:
+                        self.query_records.append(
+                            {
+                                "QUERY ID": query_id,
+                                "SOURCE CELL": cell,
+                                "INPUT": task.input_value,
+                                "TEMPLATE": task.template,
+                                "CQL": cql,
+                                "TOTAL HITS": None,
+                                "DISTINCT FORMS": 0,
+                                "STATUS": "ERROR",
+                                "ATTEMPTS": 0,
+                                "DURATION (S)": None,
+                                "ERROR": str(error),
+                            }
+                        )
                     failed += 1
                     self.log(f"Query failed: {error}")
                     self.emit("result", success=False, error=str(error))
@@ -272,6 +543,8 @@ class CorpusQuerierApp(ctk.CTk):
         self.stop_event = threading.Event()
         self.worker: QueryWorker | None = None
         self.total = 0
+        self.output_mode = ctk.StringVar(value="Total frequency")
+        self.form_option_widgets = []
 
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
@@ -287,7 +560,7 @@ class CorpusQuerierApp(ctk.CTk):
         side.grid_propagate(False)
         ctk.CTkLabel(side, text="CORPUS\nQUERIER", font=ctk.CTkFont(size=26, weight="bold"),
                      justify="left").pack(anchor="w", padx=28, pady=(30, 4))
-        ctk.CTkLabel(side, text="CLARIN.SI corpus research", text_color=("#526070", "#94A3B8"),
+        ctk.CTkLabel(side, text="CLARIN.SI corpus research · v2.0", text_color=("#526070", "#94A3B8"),
                      font=ctk.CTkFont(size=13)).pack(anchor="w", padx=28, pady=(0, 30))
         self.status_pill = ctk.CTkLabel(side, text="●  READY", fg_color=("#D9F7E8", "#123D2B"),
                                         text_color=("#087443", "#6EE7B7"), corner_radius=12, height=34)
@@ -322,6 +595,15 @@ class CorpusQuerierApp(ctk.CTk):
         self.stop_button.pack(side="right", padx=(10, 0))
         self.start_button = ctk.CTkButton(header, text="▶  Start queries", width=160, command=self._start)
         self.start_button.pack(side="right")
+        self.output_menu = ctk.CTkOptionMenu(
+            header,
+            values=list(OUTPUT_MODES),
+            variable=self.output_mode,
+            command=self._output_mode_changed,
+            width=225,
+        )
+        self.output_menu.pack(side="right", padx=(10, 14))
+        ctk.CTkLabel(header, text="Output").pack(side="right")
 
         self.tabs = ctk.CTkTabview(main, height=390)
         self.tabs.grid(row=1, column=0, sticky="ew")
@@ -347,7 +629,7 @@ class CorpusQuerierApp(ctk.CTk):
         self.current_label.grid(row=2, column=0, sticky="ew", padx=16, pady=7)
         self.log_box = ctk.CTkTextbox(monitor, font=ctk.CTkFont(family="Consolas", size=12), wrap="word")
         self.log_box.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        self.log_box.insert("end", "Ready. Configure a run above and select Start queries.\n")
+        self.log_box.insert("end", "Ready. Choose an output type, configure the run, and select Start queries.\n")
         self.log_box.configure(state="disabled")
 
     def _entry_row(self, parent, row, label, variable, browse=None, placeholder=""):
@@ -402,7 +684,7 @@ class CorpusQuerierApp(ctk.CTk):
         self.generated_browse.grid(row=1, column=2, padx=(0, 16), pady=7)
         self.words_box = ctk.CTkTextbox(tab, height=70)
         self.words_box.grid(row=2, column=0, columnspan=3, sticky="ew", padx=16, pady=7)
-        self.words_box.insert("1.0", "large, small, long")
+        self.words_box.insert("1.0", "čitati, učiti, putovati")
         self.words_box.grid_remove()
         details = ctk.CTkFrame(tab, fg_color="transparent")
         details.grid(row=3, column=0, columnspan=3, sticky="ew", padx=16, pady=5)
@@ -418,7 +700,10 @@ class CorpusQuerierApp(ctk.CTk):
         ctk.CTkLabel(template_frame, text="CQL templates\n(one per line)", justify="left").grid(row=0, column=0, sticky="nw", padx=(0, 10))
         self.templates_box = ctk.CTkTextbox(template_frame, height=86, font=ctk.CTkFont(family="Consolas", size=12))
         self.templates_box.grid(row=0, column=1, sticky="ew")
-        self.templates_box.insert("1.0", '[lemma="{LEMMA}"]\n[word="(?i){WORD}"]')
+        self.templates_box.insert(
+            "1.0",
+            '[lemma="{LEMMA}"]\n[lemma="{LEMMA}" & tag="Vmr3s"]',
+        )
         lower = ctk.CTkFrame(tab, fg_color="transparent")
         lower.grid(row=5, column=0, columnspan=3, sticky="ew", padx=16, pady=(3, 8))
         lower.grid_columnconfigure(1, weight=1)
@@ -435,12 +720,40 @@ class CorpusQuerierApp(ctk.CTk):
         frame.grid(row=row, column=0, columnspan=3, sticky="ew", padx=16, pady=(4, 10))
         variables = {
             "delay": ctk.StringVar(value="5"), "timeout": ctk.StringVar(value="30"),
-            "attempts": ctk.StringVar(value="2"), "save": ctk.StringVar(value="25")}
+            "attempts": ctk.StringVar(value="2"), "save": ctk.StringVar(value="25"),
+            "min_frequency": ctk.StringVar(value=str(DEFAULT_MIN_FORM_FREQUENCY)),
+            "case_sensitive": ctk.BooleanVar(value=True)}
         setattr(self, f"{prefix}_advanced", variables)
         for i, (label, key) in enumerate([("Delay (s)", "delay"), ("Timeout (s)", "timeout"),
                                            ("Attempts", "attempts"), ("Save every", "save")]):
             ctk.CTkLabel(frame, text=label, text_color=("#526070", "#94A3B8")).grid(row=0, column=i*2, padx=(0 if i == 0 else 14, 6))
             ctk.CTkEntry(frame, textvariable=variables[key], width=65).grid(row=0, column=i*2+1)
+        ctk.CTkLabel(
+            frame,
+            text="Minimum attestations",
+            text_color=("#526070", "#94A3B8"),
+        ).grid(row=1, column=0, padx=(0, 6), pady=(10, 0), sticky="w")
+        min_frequency_entry = ctk.CTkEntry(
+            frame,
+            textvariable=variables["min_frequency"],
+            width=65,
+        )
+        min_frequency_entry.grid(row=1, column=1, pady=(10, 0), sticky="w")
+        case_switch = ctk.CTkSwitch(
+            frame,
+            text="Capitalization matters",
+            variable=variables["case_sensitive"],
+            onvalue=True,
+            offvalue=False,
+        )
+        case_switch.grid(row=1, column=2, columnspan=4, padx=(14, 0), pady=(10, 0), sticky="w")
+        self.form_option_widgets.extend([min_frequency_entry, case_switch])
+        self._output_mode_changed(self.output_mode.get())
+
+    def _output_mode_changed(self, value: str) -> None:
+        state = "disabled" if OUTPUT_MODES.get(value) == "total" else "normal"
+        for widget in self.form_option_widgets:
+            widget.configure(state=state)
 
     def _source_changed(self, value: str) -> None:
         if value == "Spreadsheet":
@@ -482,6 +795,8 @@ class CorpusQuerierApp(ctk.CTk):
         if not str(output).strip() or str(output) == ".": raise ValueError("Choose an output Excel file.")
         corpus = getattr(self, f"{prefix}_corpus").get().strip()
         if not corpus: raise ValueError("Enter a corpus name.")
+        output_mode = OUTPUT_MODES.get(self.output_mode.get())
+        if not output_mode: raise ValueError("Choose a valid output type.")
         if generated:
             input_text = self.generated_input.get().strip().strip('"')
             input_file = Path(input_text) if self.word_source.get() == "spreadsheet" else None
@@ -496,7 +811,9 @@ class CorpusQuerierApp(ctk.CTk):
                              self.words_box.get("1.0", "end"), self.word_source.get(),
                              column_letter_to_index(self.word_column.get()), templates,
                              self._number(advanced["delay"].get(), "Delay"), self._number(advanced["timeout"].get(), "Timeout"),
-                             self._number(advanced["attempts"].get(), "Attempts", True), self._number(advanced["save"].get(), "Save interval", True))
+                             self._number(advanced["attempts"].get(), "Attempts", True), self._number(advanced["save"].get(), "Save interval", True),
+                             self._number(advanced["min_frequency"].get(), "Minimum attestations", True),
+                             advanced["case_sensitive"].get(), output_mode)
         input_text = self.existing_input.get().strip().strip('"')
         input_file = Path(input_text)
         if not input_text or not input_file.exists(): raise ValueError("Choose a valid input Excel file.")
@@ -504,7 +821,9 @@ class CorpusQuerierApp(ctk.CTk):
                          self._number(self.existing_start.get(), "Start row", True), self._number(self.existing_end.get(), "End row", True, True),
                          "", "spreadsheet", 0, [], self._number(advanced["delay"].get(), "Delay"),
                          self._number(advanced["timeout"].get(), "Timeout"), self._number(advanced["attempts"].get(), "Attempts", True),
-                         self._number(advanced["save"].get(), "Save interval", True))
+                         self._number(advanced["save"].get(), "Save interval", True),
+                         self._number(advanced["min_frequency"].get(), "Minimum attestations", True),
+                         advanced["case_sensitive"].get(), output_mode)
 
     def _start(self) -> None:
         try: config = self._collect_config()
@@ -524,6 +843,7 @@ class CorpusQuerierApp(ctk.CTk):
     def _set_running(self, running: bool) -> None:
         self.start_button.configure(state="disabled" if running else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
+        self.output_menu.configure(state="disabled" if running else "normal")
         self.tabs.configure(state="disabled" if running else "normal")
         if running:
             self.status_pill.configure(text="●  RUNNING", fg_color=("#DBEAFE", "#17345C"), text_color=("#1D4ED8", "#93C5FD"))

@@ -2,11 +2,10 @@
 Type=Application
 Name=Corpus Querier
 GenericName=Corpus Query Tool
-Comment=Run CQL frequency queries against CLARIN.SI corpora
+Comment=Calculate CQL frequencies and extract word forms from CLARIN.SI corpora
 Exec=corpus-querier
 Icon=corpus-querier
 Terminal=false
 Categories=Education;Science;DataVisualization;
-Keywords=corpus;linguistics;CQL;CLARIN;research;
+Keywords=corpus;linguistics;CQL;CLARIN;frequency;word forms;research;
 StartupNotify=true
-

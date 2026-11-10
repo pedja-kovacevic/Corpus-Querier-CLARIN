@@ -1,5 +1,5 @@
 #define MyAppName "Corpus Querier"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Predrag Kovačević"
 #define MyAppExeName "Corpus Querier.exe"
 
